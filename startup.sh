@@ -14,10 +14,10 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-# 🧽 Step 1: Clean up APT and fix broken states
+# 什 Step 1: Clean up APT and fix broken states
 echo "[*] Cleaning APT cache and updating package lists..."
 apt clean
-apt update -y
+apt update
 
 echo "[*] Attempting to fix broken packages (if any)..."
 if ! apt --fix-broken install -y; then
@@ -25,15 +25,15 @@ if ! apt --fix-broken install -y; then
   exit 1
 fi
 
-# 📦 Step 2: Ensure required packages are installed
+#  Step 2: Ensure required packages are installed
 REQUIRED_PACKAGES=(
   python3
   python3-venv
   python3-pip
   unzip
   curl
-  openjdk-17-jre
-)
+  default-jre
+  )
 
 echo "[*] Ensuring required packages are installed..."
 for pkg in "${REQUIRED_PACKAGES[@]}"; do
@@ -48,7 +48,7 @@ for pkg in "${REQUIRED_PACKAGES[@]}"; do
   fi
 done
 
-# 👀 Optional: Check Python version compatibility (compare to 3.13.7 per your check)
+#  Optional: Check Python version compatibility (compare to 3.13.7 per your check)
 echo "[*] Checking Python version compatibility..."
 if ! command -v python3 >/dev/null 2>&1; then
   echo "[!] python3 not found after installing packages. Aborting."
@@ -148,9 +148,25 @@ else
   apt-get install -y docker.io
 fi
 
-# Ensure docker service running
-info "Enabling and starting docker service..."
-systemctl enable --now docker
+# Ensure Docker daemon is enabled and running
+info "Checking if Docker service is active..."
+
+if ! systemctl is-active --quiet docker; then
+  info "Starting Docker service..."
+  systemctl enable docker
+  systemctl start docker
+
+  # Wait a few seconds to let the daemon start
+  sleep 3
+fi
+
+# Double-check Docker is up
+if ! docker info >/dev/null 2>&1; then
+  err "Docker daemon failed to start or is not responding. Aborting."
+  exit 1
+fi
+
+info "Docker service is active and responding."
 
 # --- Ensure 'docker compose' command is available (Compose v2) ---
 if docker compose version >/dev/null 2>&1; then
@@ -206,35 +222,44 @@ TMP_LOG="$(mktemp /tmp/bh_install_log.XXXXXX)"
 # Note: bloodhound-cli can be interactive; running as root here to ensure containers/volumes created successfully.
 bloodhound-cli install 2>&1 | tee "${TMP_LOG}"
 
-# Try to parse admin password from the output log.
-# The CLI typically prints a line like:
-# [+] You can log in as `admin` with this password: 1WBhSFbPTurX1xBrUPUky5eqxv4wtZ26
-# Extract the last occurrence of the word "password" and everything after it on the line.
-ADMIN_PW="$(grep -i 'password' "${TMP_LOG}" | tail -n1 | sed -E 's/.*[Pp]assword[: ]*//')"
+# --- Extract admin password from installer output and save it to the invoking user's Desktop ---
+info "Attempting to parse the admin password from installer output..."
 
-# If that failed or empty, try bloodhound-cli config get default_password as a fallback
+# Typical installer line:
+# [+] You can log in as `admin` with this password: 1WBhSFbPTurX1xBrUPUky5eqxv4wtZ26
+ADMIN_PW="$(grep -i 'password' "${TMP_LOG}" | tail -n1 | sed -E 's/.*[Pp]assword[: ]*//; s/^[[:space:]]*//; s/[[:space:]]*$//')"
+
+# Fallback: try bloodhound-cli config get default_password
 if [ -z "${ADMIN_PW:-}" ]; then
-  info "Could not parse password from install output — trying 'bloodhound-cli config get default_password'..."
-  if ADMIN_PW="$(bloodhound-cli config get default_password 2>/dev/null || true)"; then
-    ADMIN_PW="$(echo "${ADMIN_PW}" | tr -d '\r\n')"
-  fi
+  info "Could not parse password from log — trying 'bloodhound-cli config get default_password'..."
+  ADMIN_PW="$(bloodhound-cli config get default_password 2>/dev/null || true)"
+  ADMIN_PW="$(echo "${ADMIN_PW}" | tr -d '\r\n')"
 fi
 
-# Write password to file(s)
-OUTFILE_CWD="${PWD}/bloodhound_admin_creds"
-OUTFILE_ROOT="/root/bloodhound_admin_creds"
+# Determine the invoking user's home directory (works when run with sudo)
+if [ -n "${SUDO_USER:-}" ]; then
+  INVOKING_USER="${SUDO_USER}"
+  USER_HOME="$(getent passwd "$INVOKING_USER" | cut -d: -f6 || true)"
+fi
+# Fallbacks if above didn't yield a home
+USER_HOME="${USER_HOME:-${HOME:-}}"
+
+# If we still don't have a home directory, fallback to current directory
+if [ -z "${USER_HOME}" ]; then
+  info "Could not determine a desktop path for the invoking user; writing to current directory instead."
+  DESKTOP_PATH="${PWD}/bloodhound_admin_creds"
+else
+  DESKTOP_DIR="${USER_HOME}/Desktop"
+  mkdir -p "${DESKTOP_DIR}" 2>/dev/null || true
+  DESKTOP_PATH="${DESKTOP_DIR}/bloodhound_admin_creds"
+fi
 
 if [ -n "${ADMIN_PW:-}" ]; then
-  echo "${ADMIN_PW}" > "${OUTFILE_CWD}"
-  echo "${ADMIN_PW}" > "${OUTFILE_ROOT}"
-  chmod 600 "${OUTFILE_CWD}" "${OUTFILE_ROOT}"
-  chown root:root "${OUTFILE_CWD}" "${OUTFILE_ROOT}" || true
-  info "Admin password saved to:"
-  info " - ${OUTFILE_CWD}"
-  info " - ${OUTFILE_ROOT}"
+  echo "${ADMIN_PW}" > "${DESKTOP_PATH}"
+  info "Admin password written to: ${DESKTOP_PATH}"
 else
-  err "Failed to determine the admin password automatically. No 'bloodhound_admin_creds' file written."
-  err "You can retrieve the password with: bloodhound-cli config get default_password"
+  err "Failed to determine the admin password automatically. No file written."
+  err "You can try retrieving it manually with: bloodhound-cli config get default_password"
 fi
 
 # cleanup temp log if you want to remove it; keep for debugging
