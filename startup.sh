@@ -59,7 +59,7 @@ PY_VERSION_RAW="$(python3 --version 2>&1 | awk '{print $2}')"
 PY_VERSION="${PY_VERSION_RAW:-0.0.0}"
 
 # Use dpkg --compare-versions if available, else fallback to sort -V comparison
-MIN_PY="3.13.7"
+MIN_PY="3.12.7"
 PY_OK=1
 if command -v dpkg >/dev/null 2>&1; then
   if dpkg --compare-versions "$PY_VERSION" ge "$MIN_PY"; then
